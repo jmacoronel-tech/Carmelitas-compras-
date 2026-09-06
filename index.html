@@ -484,7 +484,8 @@
     var t=document.getElementById("toast");
     t.textContent=msg; t.classList.add("show");
     clearTimeout(toast._h);
-    toast._h=setTimeout(function(){t.classList.remove("show");},2200);
+    var dur = String(msg).length > 40 ? 7000 : 2200;
+    toast._h=setTimeout(function(){t.classList.remove("show");},dur);
   }
 
   function condToDraft(condicion){
@@ -623,7 +624,7 @@
     }
     var ref = id ? state.db.collection(COL_PROVEEDORES).doc(id) : state.db.collection(COL_PROVEEDORES).doc();
     ref.set(data).then(function(){ toast(id?"Proveedor actualizado":"Proveedor agregado"); })
-      .catch(function(){ toast("No se pudo guardar. Intenta de nuevo."); });
+      .catch(function(err){ toast("No se pudo guardar: " + (err && err.message ? err.message : "error desconocido")); console.warn(err); });
   }
   function deleteProveedor(id){
     if(state.isDemo){ state.proveedores = state.proveedores.filter(function(p){return p.id!==id;}); refreshProveedoresDatalist(); render(); toast("Proveedor eliminado"); return; }
@@ -660,7 +661,7 @@
       return;
     }
     state.db.collection(COL_DOCUMENTOS).add(body).then(function(){ toast("Documento registrado"); })
-      .catch(function(){ toast("No se pudo guardar. Intenta de nuevo."); });
+      .catch(function(err){ toast("No se pudo guardar: " + (err && err.message ? err.message : "error desconocido")); console.warn(err); });
   }
 
   function deleteDocumento(id){
@@ -677,7 +678,7 @@
     }
     state.db.collection(COL_DOCUMENTOS).doc(id).update({estadoPago:"Pagado", pago:pago})
       .then(function(){ toast("Pago registrado"); })
-      .catch(function(){ toast("No se pudo registrar el pago."); });
+      .catch(function(err){ toast("No se pudo registrar el pago: " + (err && err.message ? err.message : "error desconocido")); console.warn(err); });
   }
 
   /* ---------------- CRUD: pagos diarios (personal) ---------------- */
@@ -709,7 +710,7 @@
     };
     var ref = id ? state.db.collection(COL_PAGOS_DIARIOS).doc(id) : state.db.collection(COL_PAGOS_DIARIOS).doc();
     ref.set(body).then(function(){ toast(id?"Registro actualizado":"Pago registrado"); })
-      .catch(function(){ toast("No se pudo guardar. Intenta de nuevo."); });
+      .catch(function(err){ toast("No se pudo guardar: " + (err && err.message ? err.message : "error desconocido")); console.warn(err); });
   }
   function deletePagoDiario(id){
     state.db.collection(COL_PAGOS_DIARIOS).doc(id).delete().then(function(){ toast("Registro eliminado"); });
@@ -720,7 +721,7 @@
     var abonos = (p.abonos||[]).concat([abono]);
     state.db.collection(COL_PAGOS_DIARIOS).doc(id).update({abonos: abonos})
       .then(function(){ toast("Abono registrado — saldo actualizado solo"); })
-      .catch(function(){ toast("No se pudo registrar el abono."); });
+      .catch(function(err){ toast("No se pudo registrar el abono: " + (err && err.message ? err.message : "error desconocido")); console.warn(err); });
   }
   function saldarPagoDiario(id){
     var p = state.pagosDiarios.find(function(x){return x.id===id;});
@@ -743,7 +744,7 @@
     else if(draft.comprobanteImg) body.comprobanteImg = draft.comprobanteImg;
     var ref = id ? state.db.collection(COL_RENDICION).doc(id) : state.db.collection(COL_RENDICION).doc();
     ref.set(body).then(function(){ toast(id?"Registro actualizado":"Ingreso registrado"); })
-      .catch(function(){ toast("No se pudo guardar. Intenta de nuevo."); });
+      .catch(function(err){ toast("No se pudo guardar: " + (err && err.message ? err.message : "error desconocido")); console.warn(err); });
   }
   function deleteRendicion(id){
     state.db.collection(COL_RENDICION).doc(id).delete().then(function(){ toast("Registro eliminado"); });
