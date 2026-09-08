@@ -647,7 +647,7 @@
   }
 
   /* ---------------- CRUD: documentos ---------------- */
-  function saveDocumento(draft){
+  function saveDocumento(draft, id){
     if(!draft.proveedorNombre.trim() || !draft.fecha){ toast("Falta proveedor o fecha"); return; }
     var lineas = draft.lineas
       .map(function(l){
@@ -668,23 +668,47 @@
       tipoDocumento: draft.tipoDocumento, numeroDocumento: draft.numeroDocumento.trim(),
       fecha: draft.fecha, proveedorNombre: draft.proveedorNombre.trim(), proveedorId: prov?prov.id:"",
       formaPago: draft.formaPago, lineas: lineas, importeTotal: importeTotal, notas: draft.notas||"",
-      createdAt: new Date().toISOString()
+      createdAt: draft._original ? draft._original.createdAt : new Date().toISOString()
     };
     if(draft.formaPago==="Contado"){
       body.estadoPago = "Pagado"; body.fechaVencimiento = "";
       body.pago = {fecha: draft.fecha, medio: draft.pagoMedio, banco: draft.pagoBanco||"", referencia: draft.pagoReferencia||""};
+    } else if(draft._original && draft._original.estadoPago==="Pagado"){
+      // Ya se había registrado el pago de esta factura a crédito — al editar solo el detalle, no se debe perder eso.
+      body.estadoPago = "Pagado"; body.pago = draft._original.pago || null;
+      body.fechaVencimiento = draft.diasCredito==="personalizado" ? draft.fechaVencManual : addDaysISO(draft.fecha, Number(draft.diasCredito));
     } else {
       body.estadoPago = "Pendiente"; body.pago = null;
       body.fechaVencimiento = draft.diasCredito==="personalizado" ? draft.fechaVencManual : addDaysISO(draft.fecha, Number(draft.diasCredito));
     }
+    if(id) body.updatedAt = new Date().toISOString();
 
     if(state.isDemo){
-      state.documentos.unshift(Object.assign({id:uid()}, body));
-      render(); toast("Documento registrado");
+      if(id){ var idx = state.documentos.findIndex(function(x){return x.id===id;}); if(idx>-1) state.documentos[idx]=Object.assign({id:id}, body); }
+      else{ state.documentos.unshift(Object.assign({id:uid()}, body)); }
+      render(); toast(id?"Documento actualizado":"Documento registrado");
       return;
     }
-    state.db.collection(COL_DOCUMENTOS).add(body).then(function(){ toast("Documento registrado"); })
+    var ref = id ? state.db.collection(COL_DOCUMENTOS).doc(id) : state.db.collection(COL_DOCUMENTOS).doc();
+    ref.set(body).then(function(){ toast(id?"Documento actualizado":"Documento registrado"); })
       .catch(function(err){ toast("No se pudo guardar: " + (err && err.message ? err.message : "error desconocido")); console.warn(err); });
+  }
+  function docToDraft(d){
+    var esCredito = d.formaPago==="Crédito";
+    var diasCredito = "30", fechaVencManual = "";
+    if(esCredito){
+      var diff = daysUntil(d.fechaVencimiento)!=null ? Math.round((new Date(d.fechaVencimiento+"T00:00:00")-new Date(d.fecha+"T00:00:00"))/86400000) : null;
+      if(diff===7||diff===15||diff===30){ diasCredito = String(diff); }
+      else { diasCredito = "personalizado"; fechaVencManual = d.fechaVencimiento||""; }
+    }
+    return {
+      tipoDocumento: d.tipoDocumento, numeroDocumento: d.numeroDocumento||"", fecha: d.fecha, proveedorNombre: d.proveedorNombre,
+      formaPago: d.formaPago, diasCredito: diasCredito, fechaVencManual: fechaVencManual,
+      pagoMedio: (d.pago&&d.pago.medio)||"Depósito", pagoBanco: (d.pago&&d.pago.banco)||"BCP", pagoReferencia: (d.pago&&d.pago.referencia)||"",
+      notas: d.notas||"",
+      lineas: (d.lineas&&d.lineas.length) ? d.lineas.map(function(l){ return Object.assign(blankLinea(), l); }) : [blankLinea()],
+      _original: {createdAt: d.createdAt, estadoPago: d.estadoPago, pago: d.pago}
+    };
   }
 
   function deleteDocumento(id){
@@ -1578,6 +1602,7 @@
         + '<td><div class="row-actions">'
           + (d.estadoPago==="Pendiente" ? '<button class="btn btn-sm" data-pagar-doc="'+d.id+'">Registrar pago</button>' : '')
           + (d.pago && d.pago.comprobanteImg ? '<button class="icon-btn" data-ver-foto="'+d.id+'" title="Ver foto del pago">📷</button>' : '')
+          + '<button class="icon-btn" data-editar-documento="'+d.id+'" title="Editar">✎</button>'
           + '<button class="icon-btn" data-del-documento="'+d.id+'" title="Eliminar">'+iconTrash()+'</button>'
           + '</div></td></tr>';
     });
@@ -1829,7 +1854,7 @@
     var tipoHint = (d.tipoDocumento==="Planilla") ? "Sugerido: personal ya registrado en planilla"
       : (d.tipoDocumento==="Estado de cuenta") ? "Sugerido: estados de cuenta ya registrados"
       : (d.tipoDocumento==="Recibo") ? "Sugerido: servicios y recibos ya registrados" : "";
-    return '<h3>Registrar documento</h3>'
+    return '<h3>'+(currentEditId?"Editar documento":"Registrar documento")+'</h3>'
       + proveedorDatalist + rubroDatalist
       + '<form id="form-documento">'
       + '<div class="field-row3">'
@@ -1920,7 +1945,26 @@
         + '<div class="field"><label>Proveedor</label><select id="prod-buscar-proveedor">'+provOpts+'</select></div>'
       + '</div>'
       + '<div id="prod-buscar-resultados">'+productoResultadosHtml()+'</div>'
-      + '<div class="modal-actions" style="justify-content:flex-end"><button type="button" class="btn" id="cancel-modal">Cerrar</button></div>';
+      + '<div class="modal-actions"><span><button type="button" class="btn" id="btn-descargar-historial-producto">⬇ Descargar Excel</button></span>'
+        + '<button type="button" class="btn" id="cancel-modal">Cerrar</button></div>';
+  }
+  var COLS_HISTORIAL_PRODUCTO = ["Fecha","Producto","Proveedor","Documento","Cantidad","Unidad","Precio unitario","Monto"].map(function(k){return {key:k,label:k};});
+  function filasHistorialProducto(resultados){
+    return resultados.map(function(r){
+      return {
+        Fecha: r.fecha, Producto: r.producto, Proveedor: r.proveedorNombre||"",
+        Documento: r.numeroDocumento||r.tipoDocumento||"",
+        Cantidad: r.cantidad!=null && r.cantidad!=="" ? r.cantidad : "",
+        Unidad: r.unidad||"", "Precio unitario": r.precioUnitario!=null && r.precioUnitario!=="" ? r.precioUnitario : "",
+        Monto: r.monto
+      };
+    });
+  }
+  function descargarHistorialProductoExcel(){
+    var resultados = buscarHistorialProducto(state.prodBuscarTexto, state.prodBuscarProveedor);
+    if(!resultados.length){ toast("No hay resultados para descargar todavía."); return; }
+    var nombreArchivo = "carmelitas_historial_" + (state.prodBuscarTexto.trim().toLowerCase().replace(/[^a-z0-9]+/g,"_") || "producto") + ".xlsx";
+    descargarExcel(nombreArchivo, [{name:"Historial", rows: filasHistorialProducto(resultados), columns: COLS_HISTORIAL_PRODUCTO}]);
   }
   function productoResultadosHtml(){
     var resultados = buscarHistorialProducto(state.prodBuscarTexto, state.prodBuscarProveedor);
@@ -2075,6 +2119,15 @@
     document.querySelectorAll("[data-del-documento]").forEach(function(b){
       b.addEventListener("click", function(){ if(confirm("¿Eliminar este documento?")) deleteDocumento(b.dataset.delDocumento); });
     });
+    document.querySelectorAll("[data-editar-documento]").forEach(function(b){
+      b.addEventListener("click", function(){
+        var doc = state.documentos.find(function(d){return d.id===b.dataset.editarDocumento;});
+        if(!doc) return;
+        currentEditId = doc.id;
+        state.documentoDraft = docToDraft(doc);
+        openModal(documentoForm(), true);
+      });
+    });
     document.querySelectorAll("[data-pagar-doc]").forEach(function(b){
       b.addEventListener("click", function(){
         var doc = state.documentos.find(function(d){return d.id===b.dataset.pagarDoc;});
@@ -2185,6 +2238,7 @@
 
   document.getElementById("modal").addEventListener("click", function(e){
     if(e.target.id==="cancel-modal") closeModal();
+    if(e.target.id==="btn-descargar-historial-producto") descargarHistorialProductoExcel();
     if(e.target.id==="btn-add-item"){
       state.documentoDraft.lineas.push(blankLinea());
       document.getElementById("documento-items").innerHTML = documentoItemsHtml();
@@ -2340,8 +2394,9 @@
       closeModal();
     } else if(e.target.id==="form-documento"){
       e.preventDefault();
-      saveDocumento(state.documentoDraft);
+      saveDocumento(state.documentoDraft, currentEditId);
       state.documentoDraft = null;
+      currentEditId = null;
       closeModal();
     } else if(e.target.id==="form-pago"){
       e.preventDefault();
