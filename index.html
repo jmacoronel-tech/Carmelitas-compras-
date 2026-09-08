@@ -425,6 +425,7 @@
   var TIPOS_RESPALDO_DIARIO = ["Factura","Estado de cuenta","Recibo simple","Sin documento"];
   var MONEDAS = ["Soles","Dólares"];
   var TIPOS_COMPROBANTE_REND = ["Factura","Boleta","Recibo simple","Voucher / depósito","Sin comprobante"];
+  var UNIDADES = ["Unidad","Kg","Litro","Paquete","Saco","Docena","Caja","Otro"];
   var PAYMENT_WARNING_DAYS = 3;
   var MAX_DATAURL_LEN = 280000; // ~200 KB de imagen, deja margen bajo el límite de 256 KiB por documento
 
@@ -449,7 +450,9 @@
     pdDesbloqueado: false, pdFilterTipo: "", pdFilterEstado: "", pdFilterText: "", pdFilterDesde: "", pdFilterHasta: "",
     pdView: "pagos", rendiciones: [], rFilterDesde: "", rFilterHasta: "", rFilterMoneda: "",
     editing: null, documentoDraft: null, pendingComprobanteImg: null, pagoDiarioDraft: null, abonoTargetId: null,
-    rendicionDraft: null, pendingRendicionImg: null
+    rendicionDraft: null, pendingRendicionImg: null,
+    semDesde: mondayOf(todayISO()), semHasta: sundayOf(todayISO()),
+    prodBuscarTexto: "", prodBuscarProveedor: ""
   };
 
   function uid(){ return Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(-4); }
@@ -474,6 +477,15 @@
     if(isNaN(d)) return "—";
     return d.toLocaleDateString("es-PE",{day:"2-digit",month:"short",year:"numeric"});
   }
+  function mondayOf(dateStr){
+    var d = new Date((dateStr||todayISO())+"T00:00:00");
+    if(isNaN(d)) d = new Date();
+    var dow = d.getDay(); // 0=domingo..6=sábado
+    var diff = dow===0 ? -6 : (1-dow);
+    d.setDate(d.getDate()+diff);
+    return d.toISOString().slice(0,10);
+  }
+  function sundayOf(dateStr){ return addDaysISO(mondayOf(dateStr), 6); }
   function payClass(c){
     if(c==="Contado") return "good";
     if(c==="Crédito 7 días") return "crit";
@@ -502,8 +514,11 @@
       formaPago:"Crédito", diasCredito:"30", fechaVencManual:"",
       pagoMedio:"Depósito", pagoBanco:"BCP", pagoReferencia:"",
       notas:"",
-      lineas:[{centro:"Panadería", rubro:"Insumos", detalle:"", monto:""}]
+      lineas:[blankLinea()]
     };
+  }
+  function blankLinea(){
+    return {centro:"Panadería", rubro:"Insumos", detalle:"", cantidad:"", unidad:"Kg", precioUnitario:"", monto:""};
   }
 
   function seedDemoState(){
@@ -511,7 +526,7 @@
     function pid(nombre){ var p=state.proveedores.find(function(x){return x.nombre===nombre;}); return p?p.id:""; }
 
     function doc(o){
-      var lineas = o.lineas.map(function(l){ return Object.assign({centro:"Panadería", rubro:"Insumos", detalle:""}, l); });
+      var lineas = o.lineas.map(function(l){ return Object.assign({centro:"Panadería", rubro:"Insumos", detalle:"", cantidad:"", unidad:"", precioUnitario:""}, l); });
       var importeTotal = lineas.reduce(function(s,l){return s+Number(l.monto||0);},0);
       return Object.assign({
         id: uid(), proveedorId: pid(o.proveedorNombre), lineas: lineas, importeTotal: importeTotal,
@@ -635,7 +650,15 @@
   function saveDocumento(draft){
     if(!draft.proveedorNombre.trim() || !draft.fecha){ toast("Falta proveedor o fecha"); return; }
     var lineas = draft.lineas
-      .map(function(l){ return {centro:l.centro, rubro:l.rubro, detalle:(l.detalle||"").trim(), monto:Number(l.monto)||0}; })
+      .map(function(l){
+        return {
+          centro:l.centro, rubro:l.rubro, detalle:(l.detalle||"").trim(),
+          cantidad: l.cantidad==="" || l.cantidad==null ? null : Number(l.cantidad)||0,
+          unidad: l.unidad || "",
+          precioUnitario: l.precioUnitario==="" || l.precioUnitario==null ? null : Number(l.precioUnitario)||0,
+          monto:Number(l.monto)||0
+        };
+      })
       .filter(function(l){ return l.monto>0; });
     if(!lineas.length){ toast("Agrega al menos una línea con monto"); return; }
     var importeTotal = lineas.reduce(function(s,l){return s+l.monto;},0);
@@ -806,6 +829,77 @@
     function add(r){ if(r && !set[r.toLowerCase()]){ set[r.toLowerCase()]=true; out.push(r); } }
     RUBROS.forEach(add);
     state.documentos.forEach(function(d){ (d.lineas||[]).forEach(function(l){ add(l.rubro); }); });
+    return out;
+  }
+
+  /* ---------------- Historial de productos y precios ---------------- */
+  // Junta cada línea de cada documento con su fecha y proveedor, solo las que tienen producto identificado.
+  function todasLasLineasConContexto(){
+    var out = [];
+    state.documentos.forEach(function(d){
+      (d.lineas||[]).forEach(function(l){
+        if(!l.detalle) return;
+        out.push({
+          producto: l.detalle, cantidad: l.cantidad, unidad: l.unidad, precioUnitario: l.precioUnitario,
+          monto: l.monto, fecha: d.fecha, proveedorNombre: d.proveedorNombre, docId: d.id,
+          numeroDocumento: d.numeroDocumento, tipoDocumento: d.tipoDocumento
+        });
+      });
+    });
+    return out;
+  }
+  // Sugerencias de productos ya comprados a un proveedor específico (para el datalist del formulario).
+  function productosSugerencias(proveedorNombre){
+    var set = {}; var out = [];
+    var nombreNorm = (proveedorNombre||"").trim().toLowerCase();
+    todasLasLineasConContexto().forEach(function(l){
+      if(nombreNorm && (l.proveedorNombre||"").trim().toLowerCase()!==nombreNorm) return;
+      var key = l.producto.trim().toLowerCase();
+      if(key && !set[key]){ set[key]=true; out.push(l.producto.trim()); }
+    });
+    return out.sort(function(a,b){ return a.localeCompare(b); });
+  }
+  // Última compra registrada de un producto a un proveedor (con precio), para autocompletar y comparar.
+  function historialPrecioProducto(proveedorNombre, producto){
+    var nombreNorm = (proveedorNombre||"").trim().toLowerCase();
+    var prodNorm = (producto||"").trim().toLowerCase();
+    if(!prodNorm) return null;
+    var candidatos = todasLasLineasConContexto().filter(function(l){
+      if(l.producto.trim().toLowerCase()!==prodNorm) return false;
+      if(nombreNorm && (l.proveedorNombre||"").trim().toLowerCase()!==nombreNorm) return false;
+      return l.precioUnitario!=null && l.precioUnitario!=="" && Number(l.precioUnitario)>0;
+    });
+    if(!candidatos.length) return null;
+    candidatos.sort(function(a,b){ return new Date(b.fecha)-new Date(a.fecha); });
+    return candidatos[0];
+  }
+  // Mensaje de alerta de precio: compara el precio que se está por guardar contra el último registrado.
+  function precioAlertaInfo(proveedorNombre, producto, precioActual){
+    var previo = historialPrecioProducto(proveedorNombre, producto);
+    if(!previo) return {tipo:"nuevo", texto:"Primer registro de este producto con este proveedor — no hay precio anterior para comparar."};
+    var pAnt = Number(previo.precioUnitario), pAct = Number(precioActual);
+    if(!(pAct>0)) return {tipo:"info", texto:"Último precio registrado: S/ "+pAnt.toFixed(2)+" ("+fmtDate(previo.fecha)+")"+(previo.unidad?" por "+previo.unidad:"")+"."};
+    var delta = pAct - pAnt;
+    var pct = pAnt ? (delta/pAnt*100) : 0;
+    if(Math.abs(delta) < 0.005){
+      return {tipo:"igual", texto:"✓ Mismo precio que la última compra: S/ "+pAnt.toFixed(2)+" ("+fmtDate(previo.fecha)+")."};
+    }
+    if(delta > 0){
+      return {tipo:"subio", texto:"⚠ Subió de precio: antes S/ "+pAnt.toFixed(2)+" ("+fmtDate(previo.fecha)+") → ahora S/ "+pAct.toFixed(2)+" (+"+pct.toFixed(1)+"%)."};
+    }
+    return {tipo:"bajo", texto:"Bajó de precio: antes S/ "+pAnt.toFixed(2)+" ("+fmtDate(previo.fecha)+") → ahora S/ "+pAct.toFixed(2)+" ("+pct.toFixed(1)+"%)."};
+  }
+  // Historial completo de un producto (todas las compras), para el buscador de productos.
+  function buscarHistorialProducto(texto, proveedorNombre){
+    var q = (texto||"").trim().toLowerCase();
+    var nombreNorm = (proveedorNombre||"").trim().toLowerCase();
+    if(!q) return [];
+    var out = todasLasLineasConContexto().filter(function(l){
+      if(l.producto.toLowerCase().indexOf(q)===-1) return false;
+      if(nombreNorm && (l.proveedorNombre||"").trim().toLowerCase()!==nombreNorm) return false;
+      return true;
+    });
+    out.sort(function(a,b){ return new Date(b.fecha)-new Date(a.fecha); });
     return out;
   }
 
@@ -991,6 +1085,95 @@
       return {nombre:name, docs:docs, subtotal:subtotal};
     });
   }
+  /* ---------------- Pagos de la semana (vencidos + por vencer en un rango) ---------------- */
+  function pagosSemana(){
+    var desde = state.semDesde, hasta = state.semHasta;
+    return pendientes().filter(function(d){
+      if(!d.fechaVencimiento) return false;
+      var n = daysUntil(d.fechaVencimiento);
+      if(n!=null && n<0) return true; // vencido: siempre entra, sin importar el rango
+      return enRango(d.fechaVencimiento, desde, hasta); // por vencer dentro de la semana elegida
+    });
+  }
+  function bloquesSemanaPorProveedor(){
+    var byProv = {};
+    pagosSemana().forEach(function(d){ (byProv[d.proveedorNombre]=byProv[d.proveedorNombre]||[]).push(d); });
+    return Object.keys(byProv).sort().map(function(name){
+      var docs = byProv[name].slice().sort(function(a,b){ return new Date(a.fechaVencimiento)-new Date(b.fechaVencimiento); });
+      var subtotal = docs.reduce(function(s,d){return s+Number(d.importeTotal||0);},0);
+      return {nombre:name, docs:docs, subtotal:subtotal};
+    });
+  }
+  function imprimirPagosSemana(){
+    var bloques = bloquesSemanaPorProveedor();
+    var total = bloques.reduce(function(s,b){return s+b.subtotal;},0);
+    var F = '"Georgia", "Times New Roman", serif';
+    var html = '<div style="font-family:Arial, Helvetica, sans-serif;color:#20242c;max-width:900px;margin:0 auto;">'
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #1f2d50;padding-bottom:14px;margin-bottom:18px;">'
+        + '<div><div style="font-family:'+F+';font-size:22px;font-weight:700;letter-spacing:.03em;color:#1f2d50;">CARMELITAS PAN S.A.C.</div>'
+        + '<div style="font-size:11px;color:#6b7280;letter-spacing:.08em;text-transform:uppercase;margin-top:2px;">Panadería &amp; Cafetería</div></div>'
+        + '<div style="text-align:right;"><div style="font-size:13px;font-weight:700;color:#1f2d50;text-transform:uppercase;letter-spacing:.05em;">Pagos de la Semana</div>'
+        + '<div style="font-size:11px;color:#6b7280;margin-top:2px;">Semana del '+fmtDate(state.semDesde)+' al '+fmtDate(state.semHasta)+'</div></div>'
+      + '</div>';
+    if(!bloques.length){
+      html += '<div style="text-align:center;padding:36px;color:#6b7280;border:1px dashed #dde1e8;border-radius:6px;">No hay pagos vencidos ni por vencer en esta semana.</div>';
+    } else {
+      bloques.forEach(function(b){
+        html += '<div style="margin-bottom:16px;break-inside:avoid;">'
+          + '<div style="background:#eef1f6;padding:7px 10px;font-size:11.5px;font-weight:700;color:#1f2d50;text-transform:uppercase;letter-spacing:.04em;border-left:3px solid #1f2d50;">'+esc(b.nombre)+'</div>'
+          + '<table style="width:100%;border-collapse:collapse;font-size:11.5px;">'
+          + '<thead><tr>'
+            + '<th style="text-align:left;padding:6px 10px;font-size:9.5px;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #dde1e8;">Documento</th>'
+            + '<th style="text-align:left;padding:6px 10px;font-size:9.5px;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #dde1e8;">Vencimiento</th>'
+            + '<th style="text-align:left;padding:6px 10px;font-size:9.5px;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #dde1e8;">Estado</th>'
+            + '<th style="text-align:right;padding:6px 10px;font-size:9.5px;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #dde1e8;">Monto</th>'
+          + '</tr></thead><tbody>';
+        b.docs.forEach(function(d){
+          var n = daysUntil(d.fechaVencimiento);
+          var label = n<0 ? "VENCIDO ("+Math.abs(n)+" d.)" : (n===0?"Vence hoy":"Por vencer");
+          var color = n<0 ? "#a5372b" : "#a97317";
+          html += '<tr>'
+            + '<td style="padding:6px 10px;border-bottom:1px solid #eef1f6;">'+esc(d.numeroDocumento||d.tipoDocumento||"—")+'</td>'
+            + '<td style="padding:6px 10px;border-bottom:1px solid #eef1f6;">'+fmtDate(d.fechaVencimiento)+'</td>'
+            + '<td style="padding:6px 10px;border-bottom:1px solid #eef1f6;color:'+color+';font-weight:600;">'+label+'</td>'
+            + '<td style="padding:6px 10px;border-bottom:1px solid #eef1f6;text-align:right;font-weight:600;">'+money(d.importeTotal)+'</td>'
+            + '</tr>';
+        });
+        html += '</tbody></table>'
+          + '<div style="text-align:right;padding:6px 10px;font-size:11.5px;font-style:italic;color:#1f2d50;">Subtotal '+esc(b.nombre)+': <b style="font-style:normal;">'+money(b.subtotal)+'</b></div>'
+          + '</div>';
+      });
+    }
+    html += '<div style="background:#1f2d50;color:#fff;padding:12px 18px;border-radius:4px;display:flex;justify-content:space-between;align-items:center;margin-top:8px;">'
+      + '<span style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;">Total de la semana</span>'
+      + '<span style="font-family:'+F+';font-size:19px;font-weight:700;">'+money(total)+'</span></div>'
+      + '<div style="text-align:right;font-size:9.5px;color:#9aa1ad;margin-top:8px;font-style:italic;">Generado el '+new Date().toLocaleString("es-PE")+'</div>'
+      + '</div>';
+    document.getElementById("print-area").innerHTML = html;
+    window.print();
+  }
+  function descargarPagosSemanaExcel(){
+    if(typeof XLSX==="undefined"){ toast("Excel no cargó aquí — usa la opción Imprimir."); return; }
+    var bloques = bloquesSemanaPorProveedor();
+    var aoa = [["PAGOS DE LA SEMANA — Carmelitas Pan SAC"],["Semana del "+fmtDate(state.semDesde)+" al "+fmtDate(state.semHasta)],[]];
+    bloques.forEach(function(b){
+      aoa.push([b.nombre]);
+      aoa.push(["Documento","Vencimiento","Estado","Monto"]);
+      b.docs.forEach(function(d){
+        var n = daysUntil(d.fechaVencimiento);
+        aoa.push([d.numeroDocumento||d.tipoDocumento||"", d.fechaVencimiento||"", n<0?"VENCIDO":"Por vencer", d.importeTotal]);
+      });
+      aoa.push(["","","TOTAL", b.subtotal]);
+      aoa.push([]);
+    });
+    var ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws["!cols"] = [{wch:20},{wch:14},{wch:12},{wch:12}];
+    var wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Pagos semana");
+    var buf = XLSX.write(wb, {type:"array", bookType:"xlsx"});
+    descargarArchivo("carmelitas_pagos_semana.xlsx", buf);
+  }
+
   function estadoTextoPorPagar(d){
     var n = daysUntil(d.fechaVencimiento);
     if(n==null) return {label:"Sin fecha", color:"#8a8f99"};
@@ -1207,6 +1390,8 @@
     else if(key==="doc-print") imprimirReporte("Reporte de compras", periodoTexto(state.filterDesde, state.filterHasta), COLS_DOCUMENTOS, filasDocumentos(documentosFiltrados()), "Total", money(documentosFiltrados().reduce(function(s,d){return s+Number(d.importeTotal||0);},0)));
     else if(key==="pagar-xlsx") descargarPorPagarAgrupadoExcel();
     else if(key==="pagar-print") imprimirPorPagarAgrupado();
+    else if(key==="sem-xlsx") descargarPagosSemanaExcel();
+    else if(key==="sem-print") imprimirPagosSemana();
     else if(key==="pago-csv") descargarCSV("carmelitas_pagos.csv", filasPagos(pagosFiltrados()), COLS_PAGOS);
     else if(key==="pago-xlsx") descargarExcel("carmelitas_pagos.xlsx", [{name:"Pagos", rows:filasPagos(pagosFiltrados()), columns:COLS_PAGOS}]);
     else if(key==="pago-print") imprimirReporte("Pagos realizados", periodoTexto(state.pagoFilterDesde, state.pagoFilterHasta), COLS_PAGOS, filasPagos(pagosFiltrados()), "Total pagado", money(pagosFiltrados().reduce(function(s,d){return s+Number(d.importeTotal||0);},0)));
@@ -1256,6 +1441,8 @@
     actions.innerHTML = "";
     if(state.tab==="documentos"){
       actions.innerHTML = '<div class="btn-group">'
+        + '<button class="btn" id="btn-buscar-producto" title="Ver historial y precios de un producto">🔍 Buscar producto</button>'
+        + '<span class="sep"></span>'
         + '<button class="btn" data-report="doc-csv" title="Descargar CSV">CSV</button>'
         + '<button class="btn" data-report="doc-xlsx" title="Descargar Excel">Excel</button>'
         + '<button class="btn" data-report="doc-print" title="Imprimir / PDF">Imprimir</button>'
@@ -1263,6 +1450,11 @@
         + '<button class="btn btn-primary" id="btn-new-documento">+ Registrar documento</button></div>';
     } else if(state.tab==="porpagar"){
       actions.innerHTML = '<div class="btn-group">'
+        + '<button class="btn" id="btn-buscar-producto" title="Ver historial y precios de un producto">🔍 Buscar producto</button>'
+        + '<span class="sep"></span>'
+        + '<button class="btn" data-report="sem-xlsx" title="Descargar Excel">Excel semana</button>'
+        + '<button class="btn" data-report="sem-print" title="Imprimir / PDF">🗓 Pagos de la semana</button>'
+        + '<span class="sep"></span>'
         + '<button class="btn" data-report="pagar-xlsx" title="Descargar Excel">Excel</button>'
         + '<button class="btn" data-report="pagar-print" title="Imprimir / PDF">Imprimir</button>'
         + '<span class="sep"></span>'
@@ -1402,9 +1594,19 @@
     });
     var provNames = Object.keys(byProv).sort();
 
-    if(!provNames.length){ return '<div class="panel"><div class="empty-note">No hay facturas a crédito pendientes de pago. 🎉</div></div>'; }
+    var htmlSemana = '<div class="panel" style="margin-bottom:16px;background:var(--surface-2);">'
+      + '<div class="panel-body" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">'
+      + '<b style="font-size:12.5px;">🗓 Semana para "Pagos de la semana"</b>'
+      + '<input type="date" id="sem-desde" value="'+esc(state.semDesde)+'" title="Desde">'
+      + '<span style="color:var(--text-3);">al</span>'
+      + '<input type="date" id="sem-hasta" value="'+esc(state.semHasta)+'" title="Hasta">'
+      + '<button type="button" class="btn btn-sm" id="sem-hoy">Esta semana</button>'
+      + '<span class="empty-note" style="padding:0;">Incluye vencidos + lo que vence en ese rango, al imprimir "Pagos de la semana" arriba.</span>'
+      + '</div></div>';
 
-    var html = "";
+    if(!provNames.length){ return htmlSemana + '<div class="panel"><div class="empty-note">No hay facturas a crédito pendientes de pago. 🎉</div></div>'; }
+
+    var html = htmlSemana;
     provNames.forEach(function(name){
       var docs = byProv[name].slice().sort(function(a,b){ return (daysUntil(a.fechaVencimiento)||999)-(daysUntil(b.fechaVencimiento)||999); });
       var subtotal = docs.reduce(function(s,d){return s+Number(d.importeTotal||0);},0);
@@ -1667,16 +1869,25 @@
   }
   function documentoItemsHtml(){
     var d = state.documentoDraft;
+    var productoDatalistId = "documento-producto-datalist";
     return d.lineas.map(function(l,i){
       var centroOpts = CENTROS.map(function(c){return '<option'+(l.centro===c?' selected':'')+'>'+esc(c)+'</option>';}).join("");
-      return '<div class="item-row" data-item-index="'+i+'">'
+      var unidadOpts = UNIDADES.map(function(u){return '<option'+(l.unidad===u?' selected':'')+'>'+esc(u)+'</option>';}).join("");
+      var alerta = (l.detalle && l.precioUnitario!=="" && Number(l.precioUnitario)>0) ? precioAlertaInfo(d.proveedorNombre, l.detalle, l.precioUnitario) : null;
+      var alertaColor = !alerta ? "" : alerta.tipo==="subio" ? "#a5372b" : alerta.tipo==="bajo" ? "#3d6b4a" : alerta.tipo==="igual" ? "#3d6b4a" : "#6b7280";
+      return '<div class="item-row" data-item-index="'+i+'" style="grid-template-columns:.9fr 1fr 1.3fr .6fr .8fr .8fr .8fr auto;">'
         + '<div><label>Centro</label><select data-item-field="centro">'+centroOpts+'</select></div>'
         + '<div><label>Rubro</label><input type="text" list="documento-rubro-datalist" data-item-field="rubro" value="'+esc(l.rubro)+'" placeholder="Ej: Insumos"></div>'
-        + '<div><label>Detalle</label><input type="text" data-item-field="detalle" value="'+esc(l.detalle)+'" placeholder="Ej: 10 aceite, sal"></div>'
+        + '<div><label>Producto</label><input type="text" list="'+productoDatalistId+'" data-item-field="detalle" value="'+esc(l.detalle)+'" placeholder="Ej: Salchicha de Huacho"></div>'
+        + '<div><label>Cant.</label><input type="number" step="any" min="0" data-item-field="cantidad" value="'+esc(l.cantidad)+'"></div>'
+        + '<div><label>Unidad</label><select data-item-field="unidad">'+unidadOpts+'</select></div>'
+        + '<div><label>Precio unit. (S/)</label><input type="number" step="any" min="0" data-item-field="precioUnitario" value="'+esc(l.precioUnitario)+'"></div>'
         + '<div><label>Monto (S/)</label><input type="number" step="any" data-item-field="monto" value="'+esc(l.monto)+'"></div>'
         + '<button type="button" class="item-remove" data-remove-item="'+i+'" title="Quitar línea">×</button>'
+        + (alerta ? '<div class="item-alert" style="grid-column:1/-1;font-size:11px;color:'+alertaColor+';margin:-4px 0 4px;">'+esc(alerta.texto)+'</div>' : '')
         + '</div>';
-    }).join("");
+    }).join("")
+    + '<datalist id="'+productoDatalistId+'">'+productosSugerencias(d.proveedorNombre).map(function(p){return '<option value="'+esc(p)+'"></option>';}).join("")+'</datalist>';
   }
   function pagoForm(doc){
     var img = state.pendingComprobanteImg;
@@ -1695,6 +1906,59 @@
       + '<div class="modal-actions" style="justify-content:flex-end"><button type="button" class="btn" id="cancel-modal">Cancelar</button><button type="submit" class="btn btn-primary">Registrar</button></div>'
       + '</form>';
   }
+
+  /* ---------------- Buscador de historial de productos ---------------- */
+  function productoBuscarForm(){
+    var provOpts = '<option value="">Todos los proveedores</option>'
+      + state.proveedores.slice().sort(function(a,b){return a.nombre.localeCompare(b.nombre);}).map(function(p){
+          return '<option value="'+esc(p.nombre)+'"'+(state.prodBuscarProveedor===p.nombre?' selected':'')+'>'+esc(p.nombre)+'</option>';
+        }).join("");
+    return '<h3>Buscar historial de un producto</h3>'
+      + '<p style="color:var(--text-2);font-size:12.5px;margin:-4px 0 14px;">Escribe el nombre del producto (ej: "salchicha de huacho") para ver cada compra registrada, cuántas veces lo compraste y si subió de precio.</p>'
+      + '<div class="field-row">'
+        + '<div class="field" style="flex:2;"><label>Producto</label><input type="text" id="prod-buscar-input" value="'+esc(state.prodBuscarTexto)+'" placeholder="Escribe parte del nombre del producto…" autofocus></div>'
+        + '<div class="field"><label>Proveedor</label><select id="prod-buscar-proveedor">'+provOpts+'</select></div>'
+      + '</div>'
+      + '<div id="prod-buscar-resultados">'+productoResultadosHtml()+'</div>'
+      + '<div class="modal-actions" style="justify-content:flex-end"><button type="button" class="btn" id="cancel-modal">Cerrar</button></div>';
+  }
+  function productoResultadosHtml(){
+    var resultados = buscarHistorialProducto(state.prodBuscarTexto, state.prodBuscarProveedor);
+    if(!state.prodBuscarTexto.trim()){
+      return '<div class="empty-note">Escribe el nombre de un producto para ver su historial.</div>';
+    }
+    if(!resultados.length){
+      return '<div class="empty-note">No hay compras registradas de "'+esc(state.prodBuscarTexto)+'" todavía.</div>';
+    }
+    var conPrecio = resultados.filter(function(r){ return r.precioUnitario!=null && r.precioUnitario!=="" && Number(r.precioUnitario)>0; });
+    var resumen = "";
+    if(conPrecio.length){
+      var ultimo = conPrecio[0], anterior = conPrecio[1];
+      resumen = '<div style="background:var(--surface-2);border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:12.5px;">'
+        + '<b>'+resultados.length+'</b> compra(s) registrada(s) · Último precio: <b>S/ '+Number(ultimo.precioUnitario).toFixed(2)+'</b> ('+fmtDate(ultimo.fecha)+')'
+        + (anterior ? (Number(ultimo.precioUnitario) > Number(anterior.precioUnitario) ? ' · <span style="color:#a5372b;">⚠ subió desde S/ '+Number(anterior.precioUnitario).toFixed(2)+'</span>'
+            : Number(ultimo.precioUnitario) < Number(anterior.precioUnitario) ? ' · <span style="color:#3d6b4a;">bajó desde S/ '+Number(anterior.precioUnitario).toFixed(2)+'</span>'
+            : ' · mismo precio que la compra anterior') : '')
+        + '</div>';
+    } else {
+      resumen = '<div style="background:var(--surface-2);border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:12.5px;"><b>'+resultados.length+'</b> compra(s) registrada(s) — sin precio unitario detallado.</div>';
+    }
+    var filas = resultados.map(function(r){
+      return '<tr>'
+        + '<td>'+fmtDate(r.fecha)+'</td>'
+        + '<td>'+esc(r.proveedorNombre||"—")+'</td>'
+        + '<td>'+esc(r.numeroDocumento||r.tipoDocumento||"—")+'</td>'
+        + '<td class="num">'+(r.cantidad!=null && r.cantidad!=="" ? esc(r.cantidad) : "—")+'</td>'
+        + '<td>'+esc(r.unidad||"—")+'</td>'
+        + '<td class="num">'+(r.precioUnitario!=null && r.precioUnitario!=="" ? money(r.precioUnitario) : "—")+'</td>'
+        + '<td class="num">'+money(r.monto)+'</td>'
+        + '</tr>';
+    }).join("");
+    return resumen + '<div class="table-wrap" style="max-height:320px;overflow:auto;"><table><thead><tr>'
+      + '<th>Fecha</th><th>Proveedor</th><th>Documento</th><th class="num">Cant.</th><th>Unidad</th><th class="num">Precio unit.</th><th class="num">Monto</th>'
+      + '</tr></thead><tbody>'+filas+'</tbody></table></div>';
+  }
+
   function blankPagoDiarioDraft(){
     return {tipo:"Proveedor", beneficiario:"", concepto:"", fecha:todayISO(), tipoRespaldo:"Recibo simple", numeroDocumento:"", montoDocumento:"", montoAPagar:"", montoAbonadoAhora:"", notas:"", abonos:[]};
   }
@@ -1780,6 +2044,8 @@
     if(bpd) bpd.addEventListener("click", function(){ currentEditId=null; state.pagoDiarioDraft=blankPagoDiarioDraft(); openModal(pagoDiarioForm()); });
     var brend = document.getElementById("btn-new-rendicion");
     if(brend) brend.addEventListener("click", function(){ currentEditId=null; state.pendingRendicionImg=null; state.rendicionDraft=blankRendicionDraft(); openModal(rendicionForm()); });
+    var bbp = document.getElementById("btn-buscar-producto");
+    if(bbp) bbp.addEventListener("click", function(){ state.prodBuscarTexto=""; state.prodBuscarProveedor=""; openModal(productoBuscarForm()); });
   }
 
   function wireContentEvents(){
@@ -1789,6 +2055,13 @@
     if(fc) fc.addEventListener("change", function(e){ state.filterCentro = e.target.value; render(); });
     var fe = document.getElementById("f-estado");
     if(fe) fe.addEventListener("change", function(e){ state.filterEstado = e.target.value; render(); });
+
+    var semDesde = document.getElementById("sem-desde");
+    if(semDesde) semDesde.addEventListener("change", function(e){ state.semDesde = e.target.value; render(); });
+    var semHasta = document.getElementById("sem-hasta");
+    if(semHasta) semHasta.addEventListener("change", function(e){ state.semHasta = e.target.value; render(); });
+    var semHoy = document.getElementById("sem-hoy");
+    if(semHoy) semHoy.addEventListener("click", function(){ state.semDesde = mondayOf(todayISO()); state.semHasta = sundayOf(todayISO()); render(); });
 
     document.querySelectorAll("[data-edit-proveedor]").forEach(function(b){
       b.addEventListener("click", function(){
@@ -1913,21 +2186,35 @@
   document.getElementById("modal").addEventListener("click", function(e){
     if(e.target.id==="cancel-modal") closeModal();
     if(e.target.id==="btn-add-item"){
-      state.documentoDraft.lineas.push({centro:"Panadería", rubro:"Insumos", detalle:"", monto:""});
+      state.documentoDraft.lineas.push(blankLinea());
       document.getElementById("documento-items").innerHTML = documentoItemsHtml();
     }
     var rm = e.target.closest("[data-remove-item]");
     if(rm){
       var idx = Number(rm.dataset.removeItem);
       state.documentoDraft.lineas.splice(idx,1);
-      if(!state.documentoDraft.lineas.length) state.documentoDraft.lineas.push({centro:"Panadería", rubro:"Insumos", detalle:"", monto:""});
+      if(!state.documentoDraft.lineas.length) state.documentoDraft.lineas.push(blankLinea());
       document.getElementById("documento-items").innerHTML = documentoItemsHtml();
       updateTotalDisplay();
     }
   });
 
-  document.getElementById("modal").addEventListener("input", bindDocumentoField);
+  document.getElementById("modal").addEventListener("input", function(e){
+    if(e.target.id==="prod-buscar-input"){
+      state.prodBuscarTexto = e.target.value;
+      var resEl = document.getElementById("prod-buscar-resultados");
+      if(resEl) resEl.innerHTML = productoResultadosHtml();
+      return;
+    }
+    bindDocumentoField(e);
+  });
   document.getElementById("modal").addEventListener("change", function(e){
+    if(e.target.id==="prod-buscar-proveedor"){
+      state.prodBuscarProveedor = e.target.value;
+      var resEl2 = document.getElementById("prod-buscar-resultados");
+      if(resEl2) resEl2.innerHTML = productoResultadosHtml();
+      return;
+    }
     if(e.target.id==="rendicion-foto-input"){
       var fileR = e.target.files && e.target.files[0];
       if(!fileR) return;
@@ -1966,6 +2253,24 @@
       });
       return;
     }
+    if(e.target.dataset && e.target.dataset.itemField==="detalle" && e.target.closest(".item-row")){
+      bindDocumentoField(e);
+      var itemRow = e.target.closest(".item-row");
+      var itemIdx = Number(itemRow.dataset.itemIndex);
+      var itemLinea = state.documentoDraft.lineas[itemIdx];
+      if(itemLinea){
+        var previo = historialPrecioProducto(state.documentoDraft.proveedorNombre, itemLinea.detalle);
+        if(previo){
+          if(!itemLinea.unidad && previo.unidad) itemLinea.unidad = previo.unidad;
+          if(!itemLinea.precioUnitario) itemLinea.precioUnitario = previo.precioUnitario;
+          var cant = Number(itemLinea.cantidad)||0, precio = Number(itemLinea.precioUnitario)||0;
+          if(cant>0 && precio>0) itemLinea.monto = Math.round(cant*precio*100)/100;
+        }
+      }
+      document.getElementById("documento-items").innerHTML = documentoItemsHtml();
+      updateTotalDisplay();
+      return;
+    }
     bindDocumentoField(e);
     if(e.target.name==="formaPago" || e.target.name==="diasCredito" || e.target.name==="proveedorNombre" || e.target.name==="tipoDocumento"){
       if(e.target.name==="proveedorNombre"){
@@ -1988,11 +2293,43 @@
     var row = t.closest(".item-row");
     if(row && t.dataset.itemField){
       var idx = Number(row.dataset.itemIndex);
-      if(state.documentoDraft.lineas[idx]) state.documentoDraft.lineas[idx][t.dataset.itemField] = t.value;
+      var linea = state.documentoDraft.lineas[idx];
+      if(!linea) return;
+      linea[t.dataset.itemField] = t.value;
+      if(t.dataset.itemField==="cantidad" || t.dataset.itemField==="precioUnitario"){
+        var cant = Number(linea.cantidad)||0, precio = Number(linea.precioUnitario)||0;
+        if(cant>0 && precio>0){
+          linea.monto = Math.round(cant*precio*100)/100;
+          var montoInput = row.querySelector('[data-item-field="monto"]');
+          if(montoInput) montoInput.value = linea.monto;
+        }
+        actualizarAlertaFila(row, idx);
+      }
       updateTotalDisplay();
     } else if(t.name && t.closest("#form-documento")){
       state.documentoDraft[t.name] = t.value;
     }
+  }
+  function actualizarAlertaFila(row, idx){
+    var linea = state.documentoDraft.lineas[idx];
+    if(!linea) return;
+    var existente = row.querySelector(".item-alert");
+    if(!linea.detalle || !(Number(linea.precioUnitario)>0)){
+      if(existente) existente.remove();
+      return;
+    }
+    var alerta = precioAlertaInfo(state.documentoDraft.proveedorNombre, linea.detalle, linea.precioUnitario);
+    var color = alerta.tipo==="subio" ? "#a5372b" : alerta.tipo==="bajo" ? "#3d6b4a" : alerta.tipo==="igual" ? "#3d6b4a" : "#6b7280";
+    if(!existente){
+      existente = document.createElement("div");
+      existente.className = "item-alert";
+      existente.style.gridColumn = "1/-1";
+      existente.style.fontSize = "11px";
+      existente.style.margin = "-4px 0 4px";
+      row.appendChild(existente);
+    }
+    existente.style.color = color;
+    existente.textContent = alerta.texto;
   }
 
   document.getElementById("modal").addEventListener("submit", function(e){
