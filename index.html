@@ -294,6 +294,11 @@
         <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="6" width="14" height="11" rx="1.5"/><path d="M15 10h4l3 3.5V17h-7"/><circle cx="6" cy="19" r="1.7"/><circle cx="17.5" cy="19" r="1.7"/></svg>
         <span>Proveedores</span>
       </button>
+      <button class="tab-btn" data-tab="kardex">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v2"/><path d="M3 8l9 5 9-5"/><path d="M3 8v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8"/></svg>
+        <span>Kardex</span>
+        <span class="tab-badge" id="badge-kardex" hidden>0</span>
+      </button>
       <button class="tab-btn" data-tab="pagosdiarios" style="border-top:1px solid var(--border); margin-top:6px; padding-top:11px;">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 9h20"/><circle cx="7" cy="14.5" r="1.4"/></svg>
         <span>Pagos diarios 🔒</span>
@@ -357,6 +362,7 @@
   var COL_DOCUMENTOS = "carmelitasPan_documentos";
   var COL_PAGOS_DIARIOS = "carmelitasPan_pagosDiarios";
   var COL_RENDICION = "carmelitasPan_rendicionCaja";
+  var COL_KARDEX_SALIDAS = "carmelitasPan_kardexSalidas";
 
   /* ---------------- Acceso: una sola clave compartida del negocio ----------------
      Firebase Authentication exige que la página esté en una dirección web real (http/https)
@@ -426,6 +432,7 @@
   var MONEDAS = ["Soles","Dólares"];
   var TIPOS_COMPROBANTE_REND = ["Factura","Boleta","Recibo simple","Voucher / depósito","Sin comprobante"];
   var UNIDADES = ["Unidad","Kg","Litro","Paquete","Saco","Docena","Caja","Otro"];
+  var MOTIVOS_SALIDA_KARDEX = ["Venta","Consumo interno / producción","Merma / vencido","Ajuste de inventario","Otro"];
   var PAYMENT_WARNING_DAYS = 3;
   var MAX_DATAURL_LEN = 280000; // ~200 KB de imagen, deja margen bajo el límite de 256 KiB por documento
 
@@ -452,7 +459,8 @@
     editing: null, documentoDraft: null, pendingComprobanteImg: null, pagoDiarioDraft: null, abonoTargetId: null,
     rendicionDraft: null, pendingRendicionImg: null,
     semDesde: mondayOf(todayISO()), semHasta: sundayOf(todayISO()),
-    prodBuscarTexto: "", prodBuscarProveedor: ""
+    prodBuscarTexto: "", prodBuscarProveedor: "",
+    kardexSalidas: [], kardexView: "existencias", kardexProductoSel: "", kardexDraft: null, kardexFilterText: ""
   };
 
   function uid(){ return Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(-4); }
@@ -475,7 +483,10 @@
     if(!s) return "—";
     var d = new Date(s+"T00:00:00");
     if(isNaN(d)) return "—";
-    return d.toLocaleDateString("es-PE",{day:"2-digit",month:"short",year:"numeric"});
+    var dd = String(d.getDate()).padStart(2,"0");
+    var mm = String(d.getMonth()+1).padStart(2,"0");
+    var yyyy = d.getFullYear();
+    return dd+"/"+mm+"/"+yyyy;
   }
   function mondayOf(dateStr){
     var d = new Date((dateStr||todayISO())+"T00:00:00");
@@ -625,6 +636,12 @@
         .sort(function(a,b){ return new Date(b.fecha)-new Date(a.fecha); });
       render();
     }, function(err){ console.warn("rendicion onSnapshot:", err); });
+
+    firestoreDb.collection(COL_KARDEX_SALIDAS).onSnapshot(function(snap){
+      state.kardexSalidas = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); })
+        .sort(function(a,b){ return new Date(b.fecha)-new Date(a.fecha); });
+      render();
+    }, function(err){ console.warn("kardexSalidas onSnapshot:", err); });
 
     render();
   }
@@ -925,6 +942,110 @@
     });
     out.sort(function(a,b){ return new Date(b.fecha)-new Date(a.fecha); });
     return out;
+  }
+
+  /* ---------------- CRUD: Kardex (salidas de mercadería) ---------------- */
+  function blankKardexDraft(){
+    return {producto:"", fecha:todayISO(), cantidad:"", unidad:"Kg", motivo:"Venta", notas:""};
+  }
+  function saveKardexSalida(draft, id){
+    if(!draft.producto.trim() || !draft.fecha || !(Number(draft.cantidad)>0)){
+      toast("Falta producto, fecha o cantidad"); return;
+    }
+    var body = {
+      producto: draft.producto.trim(), fecha: draft.fecha, cantidad: Number(draft.cantidad)||0,
+      unidad: draft.unidad||"", motivo: draft.motivo, notas: (draft.notas||"").trim(),
+      createdAt: draft.createdAt || new Date().toISOString()
+    };
+    var ref = id ? state.db.collection(COL_KARDEX_SALIDAS).doc(id) : state.db.collection(COL_KARDEX_SALIDAS).doc();
+    ref.set(body).then(function(){ toast(id?"Salida actualizada":"Salida registrada"); })
+      .catch(function(err){ toast("No se pudo guardar: " + (err && err.message ? err.message : "error desconocido")); console.warn(err); });
+  }
+  function deleteKardexSalida(id){
+    state.db.collection(COL_KARDEX_SALIDAS).doc(id).delete().then(function(){ toast("Salida eliminada"); });
+  }
+
+  // Lista de todos los productos que alguna vez se compraron (para elegir en el kardex, sin filtrar por proveedor).
+  function productosTodos(){
+    var set = {}; var out = [];
+    todasLasLineasConContexto().forEach(function(l){
+      var key = l.producto.trim().toLowerCase();
+      if(key && !set[key]){ set[key]=true; out.push(l.producto.trim()); }
+    });
+    return out.sort(function(a,b){ return a.localeCompare(b); });
+  }
+  // Última unidad usada para un producto (para prellenar el formulario de salida).
+  function ultimaUnidadProducto(producto){
+    var prodNorm = (producto||"").trim().toLowerCase();
+    var candidatos = todasLasLineasConContexto().filter(function(l){ return l.producto.trim().toLowerCase()===prodNorm && l.unidad; });
+    if(!candidatos.length) return "Kg";
+    candidatos.sort(function(a,b){ return new Date(b.fecha)-new Date(a.fecha); });
+    return candidatos[0].unidad;
+  }
+  // Arma la tarjeta de kardex de un producto: mezcla entradas (compras) y salidas registradas,
+  // ordenadas por fecha, con saldo de cantidad y costo promedio ponderado.
+  function construirKardex(producto){
+    var prodNorm = (producto||"").trim().toLowerCase();
+    if(!prodNorm) return [];
+    var movimientos = [];
+    todasLasLineasConContexto().forEach(function(l){
+      if(l.producto.trim().toLowerCase()!==prodNorm) return;
+      if(!(Number(l.cantidad)>0)) return; // sin cantidad no se puede llevar kardex de esa línea
+      var costoUnit = (l.precioUnitario!=null && l.precioUnitario!=="" && Number(l.precioUnitario)>0)
+        ? Number(l.precioUnitario)
+        : (Number(l.monto)>0 ? Number(l.monto)/Number(l.cantidad) : 0);
+      movimientos.push({
+        fecha: l.fecha, tipo:"Entrada", cantidad: Number(l.cantidad), unidad: l.unidad||"",
+        costoUnit: costoUnit, detalle: (l.proveedorNombre||"—") + (l.numeroDocumento ? " · "+l.numeroDocumento : ""),
+        orden: l.fecha + "_0"
+      });
+    });
+    state.kardexSalidas.forEach(function(s){
+      if(s.producto.trim().toLowerCase()!==prodNorm) return;
+      movimientos.push({
+        fecha: s.fecha, tipo:"Salida", cantidad: Number(s.cantidad)||0, unidad: s.unidad||"",
+        costoUnit: null, detalle: s.motivo + (s.notas ? " · "+s.notas : ""), id: s.id,
+        orden: s.fecha + "_1"
+      });
+    });
+    movimientos.sort(function(a,b){ return a.orden < b.orden ? -1 : a.orden > b.orden ? 1 : 0; });
+
+    var saldoCant = 0, valorTotal = 0;
+    return movimientos.map(function(m){
+      var costoPromedioAntes = saldoCant>0 ? valorTotal/saldoCant : 0;
+      var fila = Object.assign({}, m);
+      if(m.tipo==="Entrada"){
+        saldoCant += m.cantidad;
+        valorTotal += m.cantidad * m.costoUnit;
+      } else {
+        fila.costoUnit = costoPromedioAntes;
+        var valorSalida = m.cantidad * costoPromedioAntes;
+        saldoCant -= m.cantidad;
+        valorTotal -= valorSalida;
+        if(saldoCant < -0.0001) fila.stockNegativo = true;
+        if(valorTotal < 0) valorTotal = 0;
+      }
+      fila.saldoCantidad = Math.round(saldoCant*1000)/1000;
+      fila.costoPromedio = fila.saldoCantidad>0 ? valorTotal/fila.saldoCantidad : 0;
+      fila.valorTotal = Math.round(valorTotal*100)/100;
+      fila.montoMovimiento = Math.round(m.cantidad * (m.tipo==="Entrada"?m.costoUnit:costoPromedioAntes)*100)/100;
+      return fila;
+    });
+  }
+  // Resumen de existencias: saldo actual de cada producto (para saber qué falta comprar).
+  function existenciasKardex(){
+    return productosTodos().map(function(p){
+      var mov = construirKardex(p);
+      var ultima = mov.length ? mov[mov.length-1] : null;
+      return {
+        producto: p,
+        unidad: ultima ? ultima.unidad : ultimaUnidadProducto(p),
+        saldoCantidad: ultima ? ultima.saldoCantidad : 0,
+        costoPromedio: ultima ? ultima.costoPromedio : 0,
+        valorTotal: ultima ? ultima.valorTotal : 0,
+        movimientos: mov.length
+      };
+    });
   }
 
   /* ---------------- Filtros con rango de fechas ---------------- */
@@ -1431,6 +1552,16 @@
     else if(key==="rend-csv") descargarCSV("carmelitas_rendicion.csv", filasRendicion(rendicionesFiltradas()), COLS_RENDICION);
     else if(key==="rend-xlsx") descargarExcel("carmelitas_rendicion.xlsx", [{name:"Rendición", rows:filasRendicion(rendicionesFiltradas()), columns:COLS_RENDICION}]);
     else if(key==="rend-print") imprimirRendicion();
+    else if(key==="kdx-exist-xlsx") descargarExcel("carmelitas_kardex_existencias.xlsx", [{name:"Existencias", rows: filasExistenciasKardex(), columns: COLS_EXISTENCIAS_KARDEX}]);
+    else if(key==="kdx-mov-xlsx"){
+      if(!state.kardexProductoSel){ toast("Elige un producto primero."); return; }
+      var nombreArchivoKdx = "carmelitas_kardex_" + state.kardexProductoSel.toLowerCase().replace(/[^a-z0-9]+/g,"_") + ".xlsx";
+      descargarExcel(nombreArchivoKdx, [{name:"Kardex", rows: filasMovKardex(state.kardexProductoSel), columns: COLS_MOV_KARDEX}]);
+    }
+    else if(key==="kdx-mov-print"){
+      if(!state.kardexProductoSel){ toast("Elige un producto primero."); return; }
+      imprimirTarjetaKardex();
+    }
   }
 
   /* ---------------- Render: shell ---------------- */
@@ -1449,13 +1580,18 @@
     var nPD = pagosDiariosPendientes().length;
     badgePD.hidden = nPD===0; badgePD.textContent = nPD;
 
-    var titleMap = {resumen:"Resumen", documentos:"Documentos", porpagar:"Por pagar", pagos:"Pagos realizados", proveedores:"Proveedores", pagosdiarios:"Pagos diarios"};
+    var badgeKardex = document.getElementById("badge-kardex");
+    var nKardex = existenciasKardex().filter(function(e){ return e.movimientos>0 && e.saldoCantidad<=0; }).length;
+    badgeKardex.hidden = nKardex===0; badgeKardex.textContent = nKardex;
+
+    var titleMap = {resumen:"Resumen", documentos:"Documentos", porpagar:"Por pagar", pagos:"Pagos realizados", proveedores:"Proveedores", kardex:"Kardex", pagosdiarios:"Pagos diarios"};
     var subMap = {
       resumen:"Qué vencer hoy, qué se debe y en qué se está gastando",
       documentos:"Un registro por factura, boleta, planilla o recibo — se reparte por centro de gasto ahí mismo",
       porpagar:"Facturas a crédito agrupadas por proveedor, con el vencimiento calculado solo",
       pagos:"Historial de lo ya cancelado, con banco y medio de pago",
       proveedores:"Condición habitual de cada proveedor para no volver a calcularla",
+      kardex:"Entradas (de tus compras) y salidas de mercadería, con saldo y costo promedio por producto",
       pagosdiarios:"Solo para ti — proveedores, personal, maestros y movilidades, con el saldo a cuenta calculado solo"
     };
     document.getElementById("topbar-title").textContent = titleMap[state.tab];
@@ -1492,6 +1628,16 @@
       actions.innerHTML = '<button class="btn" data-report="backup" title="Descargar respaldo completo en Excel">⬇ Respaldo completo (.xlsx)</button>';
     } else if(state.tab==="proveedores"){
       actions.innerHTML = '<button class="btn btn-primary" id="btn-new-proveedor">+ Nuevo proveedor</button>';
+    } else if(state.tab==="kardex" && state.kardexView==="existencias"){
+      actions.innerHTML = '<div class="btn-group">'
+        + '<button class="btn" data-report="kdx-exist-xlsx" title="Descargar Excel">Excel</button>'
+        + '<span class="sep"></span>'
+        + '<button class="btn btn-primary" id="btn-new-kardex-salida">+ Registrar salida</button></div>';
+    } else if(state.tab==="kardex" && state.kardexView==="movimientos"){
+      actions.innerHTML = '<div class="btn-group">'
+        + (state.kardexProductoSel ? '<button class="btn" data-report="kdx-mov-xlsx" title="Descargar Excel">Excel</button>'
+          + '<button class="btn" data-report="kdx-mov-print" title="Imprimir / PDF">🗂 Tarjeta kardex</button><span class="sep"></span>' : '')
+        + '<button class="btn btn-primary" id="btn-new-kardex-salida">+ Registrar salida</button></div>';
     } else if(state.tab==="pagosdiarios" && state.pdDesbloqueado && state.pdView==="pagos"){
       actions.innerHTML = '<div class="btn-group">'
         + '<button class="btn" data-report="pd-csv" title="Descargar CSV">CSV</button>'
@@ -1514,6 +1660,7 @@
     else if(state.tab==="porpagar") content.innerHTML = renderPorPagar();
     else if(state.tab==="pagos") content.innerHTML = renderPagos();
     else if(state.tab==="proveedores") content.innerHTML = renderProveedores();
+    else if(state.tab==="kardex") content.innerHTML = renderKardex();
     else content.innerHTML = renderPagosDiarios();
 
     wireContentEvents();
@@ -1707,6 +1854,162 @@
     });
     html += '</tbody></table></div></div>';
     return html;
+  }
+
+  /* ---------------- Kardex de mercadería ---------------- */
+  function renderKardex(){
+    var toggle = '<div class="filters" style="margin-bottom:12px;">'
+      + '<button type="button" class="btn'+(state.kardexView==="existencias"?" btn-primary":"")+'" data-kardexview="existencias">Existencias</button>'
+      + '<button type="button" class="btn'+(state.kardexView==="movimientos"?" btn-primary":"")+'" data-kardexview="movimientos">Movimientos por producto</button>'
+      + '</div>';
+    return toggle + (state.kardexView==="movimientos" ? renderKardexMovimientos() : renderKardexExistencias());
+  }
+  function renderKardexExistencias(){
+    var q = (state.kardexFilterText||"").trim().toLowerCase();
+    var rows = existenciasKardex().filter(function(e){ return !q || e.producto.toLowerCase().indexOf(q)!==-1; })
+      .sort(function(a,b){ return a.producto.localeCompare(b.producto); });
+    var html = '<div class="filters">'
+      + '<input type="text" id="kdx-text" placeholder="Buscar producto…" value="'+esc(state.kardexFilterText)+'">'
+      + '</div>'
+      + '<div class="panel"><div class="table-wrap"><table><thead><tr>'
+      + '<th>Producto</th><th>Unidad</th><th class="num">Stock actual</th><th class="num">Costo promedio</th><th class="num">Valor en stock</th><th></th>'
+      + '</tr></thead><tbody>';
+    if(!rows.length){
+      html += '<tr><td colspan="6" class="empty-note">Aún no hay productos con cantidad registrada — agrega cantidad y precio unitario al registrar tus documentos de compra.</td></tr>';
+    } else {
+      rows.forEach(function(e){
+        var sinStock = e.movimientos>0 && e.saldoCantidad<=0;
+        html += '<tr>'
+          + '<td class="name">'+esc(e.producto)+(sinStock?' <span class="chip crit">Sin stock</span>':'')+'</td>'
+          + '<td>'+esc(e.unidad||"—")+'</td>'
+          + '<td class="num mono">'+(e.movimientos?e.saldoCantidad:"—")+'</td>'
+          + '<td class="num">'+(e.movimientos?money(e.costoPromedio):"—")+'</td>'
+          + '<td class="num">'+(e.movimientos?money(e.valorTotal):"—")+'</td>'
+          + '<td><button class="btn btn-sm" data-ver-kardex="'+esc(e.producto)+'">Ver movimientos</button></td>'
+          + '</tr>';
+      });
+    }
+    html += '</tbody></table></div></div>';
+    return html;
+  }
+  function renderKardexMovimientos(){
+    var productos = productosTodos();
+    var sel = state.kardexProductoSel;
+    var opts = '<option value="">Elige un producto…</option>' + productos.map(function(p){
+      return '<option value="'+esc(p)+'"'+(sel===p?' selected':'')+'>'+esc(p)+'</option>';
+    }).join("");
+    var html = '<div class="filters"><select id="kdx-producto-sel" style="min-width:280px;">'+opts+'</select></div>';
+    if(!sel){
+      html += '<div class="panel"><div class="empty-note">Elige un producto para ver su historial de entradas, salidas y saldo.</div></div>';
+      return html;
+    }
+    var mov = construirKardex(sel);
+    html += '<div class="panel"><div class="table-wrap"><table><thead><tr>'
+      + '<th>Fecha</th><th>Tipo</th><th>Detalle</th><th class="num">Entrada</th><th class="num">Salida</th><th class="num">Costo unit.</th><th class="num">Saldo</th><th class="num">Valor saldo</th><th></th>'
+      + '</tr></thead><tbody>';
+    if(!mov.length){
+      html += '<tr><td colspan="9" class="empty-note">Este producto todavía no tiene movimientos con cantidad registrada.</td></tr>';
+    } else {
+      mov.forEach(function(m){
+        html += '<tr'+(m.stockNegativo?' style="background:#fdeceb;"':'')+'>'
+          + '<td>'+fmtDate(m.fecha)+'</td>'
+          + '<td>'+(m.tipo==="Entrada" ? '<span class="chip good">Entrada</span>' : '<span class="chip warn">Salida</span>')+'</td>'
+          + '<td style="max-width:220px;color:var(--text-2)">'+esc(m.detalle)+(m.stockNegativo?' <b style="color:#a5372b;">⚠ saldo negativo</b>':'')+'</td>'
+          + '<td class="num mono">'+(m.tipo==="Entrada" ? m.cantidad+" "+esc(m.unidad||"") : "—")+'</td>'
+          + '<td class="num mono">'+(m.tipo==="Salida" ? m.cantidad+" "+esc(m.unidad||"") : "—")+'</td>'
+          + '<td class="num">'+money(m.costoUnit)+'</td>'
+          + '<td class="num mono">'+m.saldoCantidad+'</td>'
+          + '<td class="num">'+money(m.valorTotal)+'</td>'
+          + '<td>'+(m.tipo==="Salida" ? '<button class="icon-btn" data-del-kardex="'+m.id+'" title="Eliminar salida">'+iconTrash()+'</button>' : '')+'</td>'
+          + '</tr>';
+      });
+    }
+    html += '</tbody></table></div></div>';
+    return html;
+  }
+  function kardexSalidaForm(){
+    var d = state.kardexDraft;
+    var productos = productosTodos();
+    var productoDatalist = '<datalist id="kardex-producto-datalist">'+productos.map(function(p){return '<option value="'+esc(p)+'"></option>';}).join("")+'</datalist>';
+    var unidadOpts = UNIDADES.map(function(u){return '<option'+(d.unidad===u?' selected':'')+'>'+esc(u)+'</option>';}).join("");
+    var motivoOpts = MOTIVOS_SALIDA_KARDEX.map(function(m){return '<option'+(d.motivo===m?' selected':'')+'>'+esc(m)+'</option>';}).join("");
+    var existente = d.producto ? existenciasKardex().find(function(e){return e.producto.toLowerCase()===d.producto.trim().toLowerCase();}) : null;
+    return '<h3>Registrar salida de mercadería</h3>'
+      + '<p style="color:var(--text-2);font-size:12.5px;margin:-4px 0 14px;">Para venta, uso en producción, merma o cualquier otra salida de un producto que ya compraste.</p>'
+      + productoDatalist
+      + '<form id="form-kardex">'
+      + '<div class="field"><label>Producto</label><input type="text" name="producto" list="kardex-producto-datalist" value="'+esc(d.producto)+'" required placeholder="Escribe o elige de la lista…"></div>'
+      + (existente ? '<div class="empty-note" style="padding:2px 0 10px;text-align:left;">Stock actual según kardex: <b>'+existente.saldoCantidad+' '+esc(existente.unidad||"")+'</b></div>' : '')
+      + '<div class="field-row3">'
+        + field("Fecha","fecha","date",d.fecha,true)
+        + field("Cantidad","cantidad","number",d.cantidad,true)
+        + '<div class="field"><label>Unidad</label><select name="unidad">'+unidadOpts+'</select></div>'
+      + '</div>'
+      + '<div class="field"><label>Motivo</label><select name="motivo">'+motivoOpts+'</select></div>'
+      + '<div class="field"><label>Notas (opcional)</label><textarea name="notas" rows="2">'+esc(d.notas||"")+'</textarea></div>'
+      + '<div class="modal-actions" style="justify-content:flex-end"><button type="button" class="btn" id="cancel-modal">Cancelar</button><button type="submit" class="btn btn-primary">Guardar</button></div>'
+      + '</form>';
+  }
+  var COLS_EXISTENCIAS_KARDEX = ["Producto","Unidad","Stock actual","Costo promedio","Valor en stock"].map(function(k){return {key:k,label:k};});
+  function filasExistenciasKardex(){
+    return existenciasKardex().map(function(e){
+      return {Producto:e.producto, Unidad:e.unidad||"", "Stock actual":e.movimientos?e.saldoCantidad:0, "Costo promedio":e.movimientos?Number(e.costoPromedio.toFixed(2)):0, "Valor en stock":e.movimientos?Number(e.valorTotal.toFixed(2)):0};
+    });
+  }
+  var COLS_MOV_KARDEX = ["Fecha","Tipo","Detalle","Entrada","Salida","Costo unitario","Saldo","Valor saldo"].map(function(k){return {key:k,label:k};});
+  function filasMovKardex(producto){
+    return construirKardex(producto).map(function(m){
+      return {
+        Fecha:m.fecha, Tipo:m.tipo, Detalle:m.detalle,
+        Entrada: m.tipo==="Entrada" ? m.cantidad : "", Salida: m.tipo==="Salida" ? m.cantidad : "",
+        "Costo unitario": Number((m.costoUnit||0).toFixed(2)), Saldo: m.saldoCantidad, "Valor saldo": m.valorTotal
+      };
+    });
+  }
+  function imprimirTarjetaKardex(){
+    var producto = state.kardexProductoSel;
+    var mov = construirKardex(producto);
+    var existente = existenciasKardex().find(function(e){return e.producto===producto;});
+    var F = '"Georgia", "Times New Roman", serif';
+    var html = '<div style="font-family:Arial, Helvetica, sans-serif;color:#20242c;max-width:900px;margin:0 auto;">'
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #1f2d50;padding-bottom:14px;margin-bottom:18px;">'
+        + '<div><div style="font-family:'+F+';font-size:22px;font-weight:700;letter-spacing:.03em;color:#1f2d50;">CARMELITAS PAN S.A.C.</div>'
+        + '<div style="font-size:11px;color:#6b7280;letter-spacing:.08em;text-transform:uppercase;margin-top:2px;">Panadería &amp; Cafetería</div></div>'
+        + '<div style="text-align:right;"><div style="font-size:13px;font-weight:700;color:#1f2d50;text-transform:uppercase;letter-spacing:.05em;">Tarjeta Kardex</div>'
+        + '<div style="font-size:11px;color:#6b7280;margin-top:2px;">Método: Promedio ponderado</div></div>'
+      + '</div>'
+      + '<div style="font-size:15px;font-weight:700;color:#1f2d50;margin-bottom:2px;">'+esc(producto)+'</div>'
+      + '<div style="font-size:11px;color:#6b7280;margin-bottom:18px;">Unidad: '+esc((existente&&existente.unidad)||"—")+' · Stock actual: '+(existente?existente.saldoCantidad:0)+' · Valor en stock: '+money(existente?existente.valorTotal:0)+'</div>'
+      + '<table style="width:100%;border-collapse:collapse;font-size:11px;">'
+      + '<thead><tr>'
+        + '<th style="text-align:left;padding:6px 8px;font-size:9.5px;color:#6b7280;text-transform:uppercase;border-bottom:1px solid #dde1e8;">Fecha</th>'
+        + '<th style="text-align:left;padding:6px 8px;font-size:9.5px;color:#6b7280;text-transform:uppercase;border-bottom:1px solid #dde1e8;">Detalle</th>'
+        + '<th style="text-align:right;padding:6px 8px;font-size:9.5px;color:#6b7280;text-transform:uppercase;border-bottom:1px solid #dde1e8;">Entrada</th>'
+        + '<th style="text-align:right;padding:6px 8px;font-size:9.5px;color:#6b7280;text-transform:uppercase;border-bottom:1px solid #dde1e8;">Salida</th>'
+        + '<th style="text-align:right;padding:6px 8px;font-size:9.5px;color:#6b7280;text-transform:uppercase;border-bottom:1px solid #dde1e8;">Costo unit.</th>'
+        + '<th style="text-align:right;padding:6px 8px;font-size:9.5px;color:#6b7280;text-transform:uppercase;border-bottom:1px solid #dde1e8;">Saldo</th>'
+        + '<th style="text-align:right;padding:6px 8px;font-size:9.5px;color:#6b7280;text-transform:uppercase;border-bottom:1px solid #dde1e8;">Valor saldo</th>'
+      + '</tr></thead><tbody>';
+    if(!mov.length){
+      html += '<tr><td colspan="7" style="text-align:center;padding:24px;color:#6b7280;">Sin movimientos registrados.</td></tr>';
+    } else {
+      mov.forEach(function(m){
+        html += '<tr>'
+          + '<td style="padding:5px 8px;border-bottom:1px solid #eef1f6;">'+fmtDate(m.fecha)+'</td>'
+          + '<td style="padding:5px 8px;border-bottom:1px solid #eef1f6;color:#5b6472;">'+esc(m.detalle)+'</td>'
+          + '<td style="padding:5px 8px;border-bottom:1px solid #eef1f6;text-align:right;">'+(m.tipo==="Entrada"?m.cantidad:"—")+'</td>'
+          + '<td style="padding:5px 8px;border-bottom:1px solid #eef1f6;text-align:right;">'+(m.tipo==="Salida"?m.cantidad:"—")+'</td>'
+          + '<td style="padding:5px 8px;border-bottom:1px solid #eef1f6;text-align:right;">'+money(m.costoUnit)+'</td>'
+          + '<td style="padding:5px 8px;border-bottom:1px solid #eef1f6;text-align:right;font-weight:600;">'+m.saldoCantidad+'</td>'
+          + '<td style="padding:5px 8px;border-bottom:1px solid #eef1f6;text-align:right;">'+money(m.valorTotal)+'</td>'
+          + '</tr>';
+      });
+    }
+    html += '</tbody></table>'
+      + '<div style="text-align:right;font-size:9.5px;color:#9aa1ad;margin-top:12px;font-style:italic;">Generado el '+new Date().toLocaleString("es-PE")+'.</div>'
+      + '</div>';
+    document.getElementById("print-area").innerHTML = html;
+    window.print();
   }
 
   /* ---------------- Pagos diarios (personal) ---------------- */
@@ -2090,6 +2393,16 @@
     if(brend) brend.addEventListener("click", function(){ currentEditId=null; state.pendingRendicionImg=null; state.rendicionDraft=blankRendicionDraft(); openModal(rendicionForm()); });
     var bbp = document.getElementById("btn-buscar-producto");
     if(bbp) bbp.addEventListener("click", function(){ state.prodBuscarTexto=""; state.prodBuscarProveedor=""; openModal(productoBuscarForm()); });
+    var bkdx = document.getElementById("btn-new-kardex-salida");
+    if(bkdx) bkdx.addEventListener("click", function(){
+      currentEditId=null;
+      state.kardexDraft = blankKardexDraft();
+      if(state.kardexView==="movimientos" && state.kardexProductoSel){
+        state.kardexDraft.producto = state.kardexProductoSel;
+        state.kardexDraft.unidad = ultimaUnidadProducto(state.kardexProductoSel);
+      }
+      openModal(kardexSalidaForm());
+    });
   }
 
   function wireContentEvents(){
@@ -2213,6 +2526,19 @@
     document.querySelectorAll("[data-pdview]").forEach(function(b){
       b.addEventListener("click", function(){ state.pdView = b.dataset.pdview; render(); });
     });
+    document.querySelectorAll("[data-kardexview]").forEach(function(b){
+      b.addEventListener("click", function(){ state.kardexView = b.dataset.kardexview; render(); });
+    });
+    var kdxText = document.getElementById("kdx-text");
+    if(kdxText) kdxText.addEventListener("input", function(e){ state.kardexFilterText = e.target.value; render(); var el=document.getElementById("kdx-text"); if(el){ el.focus(); el.selectionStart=el.selectionEnd=el.value.length; } });
+    var kdxProdSel = document.getElementById("kdx-producto-sel");
+    if(kdxProdSel) kdxProdSel.addEventListener("change", function(e){ state.kardexProductoSel = e.target.value; render(); });
+    document.querySelectorAll("[data-ver-kardex]").forEach(function(b){
+      b.addEventListener("click", function(){ state.kardexProductoSel = b.dataset.verKardex; state.kardexView = "movimientos"; render(); });
+    });
+    document.querySelectorAll("[data-del-kardex]").forEach(function(b){
+      b.addEventListener("click", function(){ if(confirm("¿Eliminar esta salida?")) deleteKardexSalida(b.dataset.delKardex); });
+    });
     var rMoneda = document.getElementById("r-moneda");
     if(rMoneda) rMoneda.addEventListener("change", function(e){ state.rFilterMoneda = e.target.value; render(); });
     var rDesde = document.getElementById("r-desde");
@@ -2313,13 +2639,12 @@
       var itemIdx = Number(itemRow.dataset.itemIndex);
       var itemLinea = state.documentoDraft.lineas[itemIdx];
       if(itemLinea){
+        // Solo se autocompleta la Unidad (un select, sin riesgo de mezclarse con lo que se teclee).
+        // El precio NO se autocompleta: si el precio anterior queda escrito en el campo y la persona
+        // hace clic y teclea el nuevo precio sin borrar antes, el número anterior y el nuevo se pegan
+        // (ej. "4" + "4.50" = "44.50"). La alerta de precio (más abajo) ya avisa cuál fue el último precio.
         var previo = historialPrecioProducto(state.documentoDraft.proveedorNombre, itemLinea.detalle);
-        if(previo){
-          if(!itemLinea.unidad && previo.unidad) itemLinea.unidad = previo.unidad;
-          if(!itemLinea.precioUnitario) itemLinea.precioUnitario = previo.precioUnitario;
-          var cant = Number(itemLinea.cantidad)||0, precio = Number(itemLinea.precioUnitario)||0;
-          if(cant>0 && precio>0) itemLinea.monto = Math.round(cant*precio*100)/100;
-        }
+        if(previo && !itemLinea.unidad && previo.unidad) itemLinea.unidad = previo.unidad;
       }
       document.getElementById("documento-items").innerHTML = documentoItemsHtml();
       updateTotalDisplay();
@@ -2433,6 +2758,23 @@
       };
       saveRendicion(draftR, currentEditId);
       state.rendicionDraft = null; state.pendingRendicionImg = null;
+      closeModal();
+    } else if(e.target.id==="form-kardex"){
+      e.preventDefault();
+      var fd6 = new FormData(e.target);
+      var draftK = {
+        producto: fd6.get("producto"), fecha: fd6.get("fecha"), cantidad: fd6.get("cantidad"),
+        unidad: fd6.get("unidad"), motivo: fd6.get("motivo"), notas: fd6.get("notas")||""
+      };
+      var existenteK = existenciasKardex().find(function(x){ return x.producto.toLowerCase()===(draftK.producto||"").trim().toLowerCase(); });
+      var stockActual = existenteK ? existenteK.saldoCantidad : 0;
+      if(Number(draftK.cantidad) > stockActual){
+        if(!confirm("Según el kardex hay "+stockActual+" "+(existenteK?existenteK.unidad:"")+" en stock de \""+draftK.producto+"\". Vas a sacar "+draftK.cantidad+". ¿Registrar de todas formas?")){
+          return;
+        }
+      }
+      saveKardexSalida(draftK, currentEditId);
+      state.kardexDraft = null; currentEditId = null;
       closeModal();
     }
   });
